@@ -892,7 +892,7 @@ def format_token_count_compact(value: int) -> str:
 
     sign = "-" if value < 0 else ""
     units = ((1_000_000_000, "B"), (1_000_000, "M"), (1_000, "K"))
-    for threshold, suffix in units:
+    for idx, (threshold, suffix) in enumerate(units):
         if abs_value >= threshold:
             scaled = abs_value / threshold
             if scaled < 10:
@@ -903,20 +903,18 @@ def format_token_count_compact(value: int) -> str:
                 text = f"{scaled:.0f}"
             if "." in text:
                 text = text.rstrip("0").rstrip(".")
-            # Promote across a unit boundary when rounding pushes the
-            # coefficient to >=1000 in the current unit (e.g. 999999 / 1000
-            # == 999.999 rounds to "1000", which must render as "1M" not
-            # "1000K"). Walk up to the next larger unit; if there is no
-            # larger unit (already at "B"), fall back to the full
-            # thousands-separated integer below.
-            if float(text) >= 1000:
-                unit_index = next(
-                    i for i, (_, sfx) in enumerate(units) if sfx == suffix
-                )
-                if unit_index > 0:
-                    next_suffix = units[unit_index - 1][1]
-                    return f"{sign}1{next_suffix}"
-                break
+            # Rounding can push the mantissa across a unit boundary — e.g.
+            # 999_999 renders as "999.99K" which :.0f rounds up to "1000K".
+            # Roll it into the next larger unit so we never emit "1000<unit>":
+            # 999_999 -> "1M", 999_999_999 -> "1B". The largest unit (B) has no
+            # larger compact unit to roll into, so fall back to the full form
+            # rather than a non-canonical "1000B" (only reachable ~10^12 tokens).
+            if text == "1000":
+                if idx > 0:
+                    _, suffix = units[idx - 1]
+                    text = "1"
+                else:
+                    return f"{value:,}"
             return f"{sign}{text}{suffix}"
 
     return f"{value:,}"
