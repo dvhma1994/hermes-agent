@@ -96,6 +96,23 @@ def _resolve_path(filepath: str, task_id: str = "default") -> Path:
 _TERMINAL_CWD_SENTINELS = frozenset({"", ".", "./", "auto", "cwd"})
 
 
+def _sentinel_free_abs_cwd(raw: str | None) -> str | None:
+    """Normalize a cwd candidate to an absolute, sentinel-free anchor.
+
+    Returns the expanded path only when *raw* is non-empty, not a sentinel (see
+    ``_TERMINAL_CWD_SENTINELS``), and absolute. A relative anchor is meaningless
+    without knowing which cwd it is relative to — exactly the ambiguity that
+    misroutes worktree edits — so relative/sentinel/empty values yield ``None``.
+    """
+    raw = str(raw or "").strip()
+    if raw.lower() in _TERMINAL_CWD_SENTINELS:
+        return None
+    expanded = os.path.expanduser(raw)
+    if not os.path.isabs(expanded):
+        return None
+    return expanded
+
+
 def _configured_terminal_cwd() -> str | None:
     """Return ``$TERMINAL_CWD`` only when it names a real directory anchor.
 
@@ -104,13 +121,26 @@ def _configured_terminal_cwd() -> str | None:
     relative to, which is exactly the ambiguity that misroutes worktree edits.
     Only an absolute, sentinel-free value is honored.
     """
-    raw = (os.environ.get("TERMINAL_CWD") or "").strip()
-    if raw.lower() in _TERMINAL_CWD_SENTINELS:
+    return _sentinel_free_abs_cwd(os.environ.get("TERMINAL_CWD"))
+
+
+def _registered_task_cwd_override(task_id: str = "default") -> str | None:
+    """Return a registered cwd override for the raw task id, when available.
+
+    ``terminal_tool`` intentionally collapses CWD-only task overrides to the
+    shared ``"default"`` environment so TUI/dashboard/ACP sessions do not spin
+    up isolated sandboxes just because they have different workspaces. The cwd
+    value itself is still keyed by the raw session/task id, so file tools must
+    read that raw override before falling back to the collapsed container key.
+    """
+    try:
+        from tools.terminal_tool import resolve_task_overrides
+
+        overrides = resolve_task_overrides(task_id)
+    except Exception:
         return None
-    expanded = os.path.expanduser(raw)
-    if not os.path.isabs(expanded):
-        return None
-    return expanded
+
+    return _sentinel_free_abs_cwd(overrides.get("cwd"))
 
 
 def _get_live_tracking_cwd(task_id: str = "default") -> str | None:
@@ -149,8 +179,10 @@ def _authoritative_workspace_root(task_id: str = "default") -> str | None:
 
     Prefers the live terminal cwd (the directory the agent is actually working
     in). When no terminal command has run yet — so the live registry is empty —
-    falls back to a sentinel-free absolute ``$TERMINAL_CWD``. This is what lets
-    a worktree session warn about (and resolve into) the worktree from the very
+    falls back to a registered task/session cwd override (TUI/Desktop/ACP
+    sessions register a raw-keyed cwd before any tool runs), then to a
+    sentinel-free absolute ``$TERMINAL_CWD``. This is what lets a worktree or
+    Desktop session warn about (and resolve into) its workspace from the very
     first ``write_file``/``patch``, before any ``cd`` has populated the live cwd.
 
     Returns ``None`` only when there is genuinely no reliable anchor, in which
@@ -159,6 +191,9 @@ def _authoritative_workspace_root(task_id: str = "default") -> str | None:
     live = _get_live_tracking_cwd(task_id)
     if live:
         return live
+    registered = _registered_task_cwd_override(task_id)
+    if registered:
+        return registered
     return _configured_terminal_cwd()
 
 
@@ -168,10 +203,12 @@ def _resolve_base_dir(task_id: str = "default") -> Path:
     Resolution order:
       1. The task's live terminal cwd (the directory the agent is actually
          working in — e.g. a git worktree). Authoritative when known.
-      2. A sentinel-free, absolute ``$TERMINAL_CWD`` (the worktree path set by
+      2. A registered task/session cwd override (TUI/Desktop/ACP sessions
+         register a raw-keyed workspace cwd before any terminal command runs).
+      3. A sentinel-free, absolute ``$TERMINAL_CWD`` (the worktree path set by
          ``cli.py``/``main.py`` for ``-w`` sessions). Used even before any
          terminal command has populated the live cwd registry.
-      3. The process cwd.
+      4. The process cwd.
 
     The returned base is ALWAYS absolute. This is the core invariant that
     prevents the worktree-cwd divergence bug: a relative or sentinel
@@ -218,9 +255,10 @@ def _path_resolution_warning(filepath: str, resolved: Path, task_id: str = "defa
     target. ``None`` when the path is absolute, the base is unknown, or the
     resolved path is correctly under the workspace root.
 
-    The workspace root is the live terminal cwd when known, else a sentinel-free
-    absolute ``$TERMINAL_CWD`` — so a worktree session whose terminal registry
-    is still empty (no ``cd`` run yet) is warned on the very first write.
+    The workspace root is the live terminal cwd when known, else a registered
+    task/session cwd override, else a sentinel-free absolute ``$TERMINAL_CWD``
+    — so a worktree or Desktop session whose terminal registry is still empty
+    (no ``cd`` run yet) is warned on the very first write.
     """
     try:
         if Path(filepath).expanduser().is_absolute():
@@ -457,6 +495,14 @@ _file_ops_cache: dict = {}
 #                   Used to skip re-reads of unchanged files.  Reset on
 #                   context compression (the original content is summarised
 #                   away so the model needs the full content again).
+#   "search_dedup": dict mapping (scope, pattern, target, file_glob, limit,
+#                   offset, output_mode, context) → (mtime, result_dict,
+#                   truncated) tuple.  Mirrors "dedup" for search_files: an
+#                   identical search with an unchanged scope (mtime) returns
+#                   the cached result instead of re-scanning.  Invalidated
+#                   by the same _invalidate_dedup_for_path hook as read_file
+#                   (a write to a file in scope evicts the entry) and cleared
+#                   by reset_file_dedup on context compression.
 #   "read_timestamps": dict mapping resolved_path → modification-time float
 #                      recorded when the file was last read (or written) by
 #                      this task.  Used by write_file and patch to detect
@@ -560,6 +606,16 @@ def _cap_read_tracker_data(task_data: dict) -> None:
             except (StopIteration, KeyError):
                 break
 
+    # search_files dedup dict — same bound + eviction policy as read dedup.
+    search_dedup = task_data.get("search_dedup")
+    if search_dedup is not None and len(search_dedup) > _DEDUP_CAP:
+        excess = len(search_dedup) - _DEDUP_CAP
+        for _ in range(excess):
+            try:
+                search_dedup.pop(next(iter(search_dedup)))
+            except (StopIteration, KeyError):
+                break
+
     ts = task_data.get("read_timestamps")
     if ts is not None and len(ts) > _READ_TIMESTAMPS_CAP:
         excess = len(ts) - _READ_TIMESTAMPS_CAP
@@ -625,7 +681,8 @@ def _get_file_ops(task_id: str = "default") -> ShellFileOperations:
     )
     import time
 
-    task_id = _resolve_container_task_id(task_id)
+    raw_task_id = task_id or "default"
+    task_id = _resolve_container_task_id(raw_task_id)
 
     # Fast path: check cache -- but also verify the underlying environment
     # is still alive (it may have been killed by the cleanup thread).
@@ -658,11 +715,11 @@ def _get_file_ops(task_id: str = "default") -> ShellFileOperations:
                 terminal_env = None
 
         if terminal_env is None:
-            from tools.terminal_tool import _task_env_overrides
+            from tools.terminal_tool import resolve_task_overrides
 
             config = _get_env_config()
             env_type = config["env_type"]
-            overrides = _task_env_overrides.get(task_id, {})
+            overrides = resolve_task_overrides(raw_task_id)
 
             if env_type == "docker":
                 image = overrides.get("docker_image") or config["docker_image"]
@@ -1026,12 +1083,16 @@ def reset_file_dedup(task_id: str = None):
                     task_data["dedup"].clear()
                 if "dedup_hits" in task_data:
                     task_data["dedup_hits"].clear()
+                if "search_dedup" in task_data:
+                    task_data["search_dedup"].clear()
         else:
             for task_data in _read_tracker.values():
                 if "dedup" in task_data:
                     task_data["dedup"].clear()
                 if "dedup_hits" in task_data:
                     task_data["dedup_hits"].clear()
+                if "search_dedup" in task_data:
+                    task_data["search_dedup"].clear()
 
 
 def notify_other_tool_call(task_id: str = "default"):
@@ -1054,34 +1115,66 @@ def notify_other_tool_call(task_id: str = "default"):
                 task_data["dedup_hits"].clear()
 
 
+def _path_in_scope(file_path: str, scope_path: str) -> bool:
+    """Return True if *file_path* is *scope_path* itself or lives inside it.
+
+    Used to decide whether a write to *file_path* should invalidate a cached
+    ``search_files`` result whose scope (the searched directory) is
+    *scope_path*.  Both arguments are expected to be absolute, normalised
+    paths (as produced by ``_resolve_path_for_task``); we normalise again so
+    a trailing separator never causes a false negative.
+    """
+    if not scope_path or not file_path:
+        return False
+    fp = os.path.normpath(file_path)
+    sp = os.path.normpath(scope_path)
+    if fp == sp:
+        return True
+    # ``file_path`` is inside the ``scope_path`` directory.
+    return fp.startswith(sp + os.sep)
+
+
 def _invalidate_dedup_for_path(filepath: str, task_id: str) -> None:
-    """Remove all dedup cache entries whose resolved path matches *filepath*.
+    """Remove dedup cache entries affected by a write to *filepath*.
 
-    Called after write_file and patch so that a subsequent read_file on
-    the same path always returns fresh content instead of a stale
-    "File unchanged" stub.  The dedup cache keys are tuples of
-    ``(resolved_path, offset, limit)``; we must evict **all** offset/limit
-    combinations for the written path because any cached range could now
-    be stale.
+    Called after write_file and patch so that:
 
-    Must be called with ``_read_tracker_lock`` **not** held — acquires it
-    internally.
+    * a subsequent read_file on the same path always returns fresh content
+      instead of a stale "File unchanged" stub — read_file's dedup cache keys
+      are tuples of ``(resolved_path, offset, limit)``, so we evict **all**
+      offset/limit combinations for the written path; and
+    * a subsequent search_files whose scope contains *filepath* re-runs
+      instead of returning a stale cached result — search_files' dedup cache
+      keys are ``(scope, pattern, target, ...)`` tuples, so we evict every
+      cached search whose scope is *filepath* itself or an ancestor of it.
+
+    This is the single invalidation hook reused by both read_file and
+    search_files dedup (the latter mirrors read_file's mechanism).  Must be
+    called with ``_read_tracker_lock`` **not** held — acquires it internally.
     """
     try:
-        resolved = str(_resolve_path(filepath))
+        resolved = str(_resolve_path_for_task(filepath, task_id))
     except (OSError, ValueError):
         return
     with _read_tracker_lock:
         task_data = _read_tracker.get(task_id)
         if task_data is None:
             return
+        # read_file dedup: evict all offset/limit ranges for this exact path.
         dedup = task_data.get("dedup")
-        if not dedup:
-            return
-        # Collect keys to remove (can't mutate dict during iteration).
-        stale_keys = [k for k in dedup if k[0] == resolved]
-        for k in stale_keys:
-            del dedup[k]
+        if dedup:
+            # Collect keys to remove (can't mutate dict during iteration).
+            stale_keys = [k for k in dedup if k[0] == resolved]
+            for k in stale_keys:
+                del dedup[k]
+        # search_files dedup: evict any cached search whose scope contains the
+        # written file (a content change anywhere in scope invalidates the
+        # result).  Cached searches are keyed ``(scope, pattern, ...)``.
+        search_dedup = task_data.get("search_dedup")
+        if search_dedup:
+            stale_search = [k for k in search_dedup if _path_in_scope(resolved, k[0])]
+            for k in stale_search:
+                del search_dedup[k]
 
 
 def _update_read_timestamp(filepath: str, task_id: str) -> None:
@@ -1396,9 +1489,32 @@ def search_tool(pattern: str, target: str = "content", path: str = ".",
     try:
         offset, limit = normalize_search_pagination(offset, limit)
 
-        # Track searches to detect *consecutive* repeated search loops.
-        # Include pagination args so users can page through truncated
-        # results without tripping the repeated-search guard.
+        # Resolve the search scope (absolute) — used both as the dedup key's
+        # identity and as the freshness signal (its mtime).  Falls back to the
+        # raw path string if resolution fails; in that case dedup is skipped
+        # because we can't stat it for an mtime guard.
+        try:
+            scope_resolved = str(_resolve_path_for_task(path, task_id))
+        except (OSError, ValueError):
+            scope_resolved = str(path)
+
+        # Normalized dedup key — includes EVERY arg that affects the result so
+        # two calls differing only in output_mode/context (which the existing
+        # consecutive-loop key omits) never share a cache entry.
+        search_dedup_key = (
+            scope_resolved,
+            pattern,
+            target,
+            file_glob or "",
+            limit,
+            offset,
+            output_mode,
+            context,
+        )
+
+        # Consecutive loop-detection key (existing behaviour, left intact).
+        # Include pagination args so users can page through truncated results
+        # without tripping the repeated-search guard.
         search_key = (
             "search",
             pattern,
@@ -1408,10 +1524,72 @@ def search_tool(pattern: str, target: str = "content", path: str = ".",
             limit,
             offset,
         )
+
         with _read_tracker_lock:
             task_data = _read_tracker.setdefault(task_id, {
                 "last_key": None, "consecutive": 0, "read_history": set(),
             })
+            # Backward-compat: ensure all sub-containers exist for tasks that
+            # predate search dedup / dedup_hits (long-lived or upgraded sessions).
+            task_data.setdefault("dedup", {})
+            task_data.setdefault("dedup_hits", {})
+            search_dedup = task_data.setdefault("search_dedup", {})
+            cached = search_dedup.get(search_dedup_key)
+
+        # ── Dedup check ───────────────────────────────────────────────
+        # Identical normalized args + unchanged scope (mtime) -> return the
+        # cached result instead of re-running the scan.  Mirrors read_file's
+        # mtime dedup and reuses the SAME invalidation mechanism: a
+        # write_file/patch to a file in scope evicts the entry via
+        # _invalidate_dedup_for_path, and reset_file_dedup clears it on
+        # context compression.
+        if cached is not None:
+            cached_mtime, cached_result, cached_truncated = cached
+            try:
+                current_mtime = os.path.getmtime(scope_resolved)
+            except OSError:
+                current_mtime = None
+            if current_mtime is not None and current_mtime == cached_mtime:
+                # Count repeated cached returns so weak tool-followers that
+                # ignore the cached result don't burn their iteration budget in
+                # an infinite search loop.  After 2 cached returns for the same
+                # key we escalate to a hard BLOCK — mirrors read_file exactly.
+                with _read_tracker_lock:
+                    hits = task_data["dedup_hits"].get(search_dedup_key, 0) + 1
+                    task_data["dedup_hits"][search_dedup_key] = hits
+                    _cap_read_tracker_data(task_data)
+
+                if hits >= 2:
+                    return json.dumps({
+                        "error": (
+                            f"BLOCKED: You have run this exact search {hits + 1} times "
+                            "and the scope has NOT changed. STOP calling search_files — "
+                            "the results from your earlier search_files result in this "
+                            "conversation are still current. Proceed with your task "
+                            "using the information you already have."
+                        ),
+                        "pattern": pattern,
+                        "already_searched": hits + 1,
+                    }, ensure_ascii=False)
+
+                # Serve the cached result, marked so callers/tests can tell it
+                # was served from cache rather than re-scanned.
+                served = dict(cached_result)
+                served["dedup"] = True
+                served_json = json.dumps(served, ensure_ascii=False)
+                if cached_truncated:
+                    next_offset = offset + limit
+                    served_json += (
+                        f"\n\n[Hint: Results truncated. Use offset={next_offset} "
+                        "to see more, or narrow with a more specific pattern or file_glob.]"
+                    )
+                return served_json
+
+        # ── Perform the search ────────────────────────────────────────
+        with _read_tracker_lock:
+            # Real search — this key is no longer in a stub-loop, so reset its
+            # hit counter (mirrors read_file resetting dedup_hits on real read).
+            task_data["dedup_hits"].pop(search_dedup_key, None)
             if task_data["last_key"] == search_key:
                 task_data["consecutive"] += 1
             else:
@@ -1439,7 +1617,7 @@ def search_tool(pattern: str, target: str = "content", path: str = ".",
             for m in result.matches:
                 if hasattr(m, 'content') and m.content:
                     m.content = redact_sensitive_text(m.content, code_file=True)
-        result_dict = result.to_dict()
+        result_dict = result.to_dict(densify=True)
 
         if count >= 3:
             result_dict["_warning"] = (
@@ -1450,9 +1628,25 @@ def search_tool(pattern: str, target: str = "content", path: str = ".",
         result_json = json.dumps(result_dict, ensure_ascii=False)
         # Hint when results were truncated — explicit next offset is clearer
         # than relying on the model to infer it from total_count vs match count.
-        if result_dict.get("truncated"):
+        truncated = bool(result_dict.get("truncated"))
+        if truncated:
             next_offset = offset + limit
             result_json += f"\n\n[Hint: Results truncated. Use offset={next_offset} to see more, or narrow with a more specific pattern or file_glob.]"
+
+        # Cache the result for future identical calls.  The scope mtime guards
+        # against external scope changes (a file added/removed in the scope
+        # dir bumps its mtime); write_file/patch to an in-scope file evicts the
+        # entry explicitly via _invalidate_dedup_for_path.
+        try:
+            scope_mtime = os.path.getmtime(scope_resolved)
+        except OSError:
+            scope_mtime = None
+        if scope_mtime is not None:
+            with _read_tracker_lock:
+                search_dedup = task_data.setdefault("search_dedup", {})
+                search_dedup[search_dedup_key] = (scope_mtime, result_dict, truncated)
+                _cap_read_tracker_data(task_data)
+
         return result_json
     except Exception as e:
         return tool_error(str(e))
