@@ -218,15 +218,18 @@ class TestSearchLoopDetection(unittest.TestCase):
         self.assertNotIn("error", result)
 
     @patch("tools.file_tools._get_file_ops", return_value=_make_fake_file_ops())
-    def test_third_consecutive_search_has_warning(self, _mock_ops):
-        """3rd consecutive identical search triggers a warning."""
-        for _ in range(2):
-            search_tool("def main", task_id="t1")
-        result = json.loads(search_tool("def main", task_id="t1"))
-        self.assertIn("_warning", result)
-        self.assertIn("3 times", result["_warning"])
-        # Warning still returns results
-        self.assertIn("matches", result)
+    def test_third_consecutive_search_is_blocked(self, _mock_ops):
+        """With mtime dedup, the 3rd identical search on a stable scope
+        escalates to a hard BLOCK (search -> cached -> BLOCKED), mirroring
+        read_file's dedup_hits guard.  The previous "warn at 3rd" behaviour
+        is superseded: identical searches are now served from cache before
+        they reach the count-based loop detector."""
+        search_tool("def main", task_id="t1")   # real search
+        search_tool("def main", task_id="t1")   # 1st cached hit
+        result = json.loads(search_tool("def main", task_id="t1"))  # 2nd hit -> BLOCKED
+        self.assertIn("error", result)
+        self.assertIn("BLOCKED", result["error"])
+        self.assertNotIn("matches", result)
 
     @patch("tools.file_tools._get_file_ops", return_value=_make_fake_file_ops())
     def test_fourth_consecutive_search_is_blocked(self, _mock_ops):
@@ -273,14 +276,16 @@ class TestSearchLoopDetection(unittest.TestCase):
             self.assertNotIn("error", result)
 
     @patch("tools.file_tools._get_file_ops", return_value=_make_fake_file_ops())
-    def test_read_between_searches_resets_consecutive(self, _mock_ops):
-        """A read_file call between searches resets search consecutive counter."""
-        search_tool("def main", task_id="t1")
-        search_tool("def main", task_id="t1")
-        # A read changes the last_key, resetting consecutive for the search
-        read_file_tool("/tmp/test.py", task_id="t1")
+    def test_read_between_searches_does_not_invalidate_cache(self, _mock_ops):
+        """A read between searches does NOT invalidate the search dedup cache —
+        only writes (write_file/patch to a file in scope) do, because a read
+        cannot change the searched scope.  The identical search is therefore
+        served from cache (dedup) rather than re-scanned."""
+        search_tool("def main", task_id="t1")          # real search, cached
+        read_file_tool("/tmp/test.py", task_id="t1")   # intervening read
         result = json.loads(search_tool("def main", task_id="t1"))
-        self.assertNotIn("_warning", result)
+        self.assertTrue(result.get("dedup"),
+                        "A read must not invalidate the search cache (scope unchanged)")
         self.assertNotIn("error", result)
 
 
