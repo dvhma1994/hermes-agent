@@ -283,5 +283,76 @@ class FileToolsIntegrationTests(unittest.TestCase):
         self.assertNotIn("error", w)
 
 
+class CapDictUnitTests(unittest.TestCase):
+    """Direct unit tests for ``_cap_dict``.
+
+    ``_cap_dict`` trims a dict to a size cap by dropping insertion-order
+    oldest entries. It runs on the hot read/write path under the registry's
+    lock whenever a per-agent map or the global writer map crosses
+    ``_MAX_PATHS_PER_AGENT`` / ``_MAX_GLOBAL_WRITERS``.
+    """
+
+    def test_trim_more_than_one_does_not_raise(self):
+        # Regression: popping keys while iterating via iter(d) raised an
+        # uncaught RuntimeError ("dictionary changed size during iteration")
+        # whenever more than a single entry had to be dropped.
+        d = {i: i for i in range(10)}
+        file_state._cap_dict(d, 3)
+        self.assertEqual(len(d), 3)
+
+    def test_drops_oldest_insertion_order(self):
+        d = {"a": 1, "b": 2, "c": 3, "d": 4, "e": 5}
+        file_state._cap_dict(d, 2)
+        # Oldest (a, b, c) dropped; newest (d, e) kept.
+        self.assertEqual(list(d.keys()), ["d", "e"])
+
+    def test_already_at_or_under_limit_is_noop(self):
+        d = {"a": 1, "b": 2}
+        original = dict(d)
+        file_state._cap_dict(d, 2)
+        self.assertEqual(d, original)
+        file_state._cap_dict(d, 5)
+        self.assertEqual(d, original)
+
+    def test_trim_to_zero(self):
+        d = {"a": 1, "b": 2, "c": 3}
+        file_state._cap_dict(d, 0)
+        self.assertEqual(d, {})
+
+    def test_negative_limit_drops_everything(self):
+        # Slicing clamps a negative slice bound to 0, so ``over`` exceeds
+        # ``len(d)``; the snapshot-and-pop path must still drop everything
+        # without raising (rather than mutating-during-iteration).
+        d = {"a": 1, "b": 2, "c": 3}
+        file_state._cap_dict(d, -1)
+        self.assertEqual(d, {})
+
+    def test_through_record_read_stays_bounded(self):
+        # Smoke test that the production read path (one add → one cap, so
+        # over == 1 in steady state) keeps the per-agent map at the limit
+        # and never raises. This is NOT the over>1 regression guard — the
+        # unit tests above are — it just locks in the steady-state contract.
+        file_state.get_registry().clear()
+        tmpfiles: list[str] = []
+        try:
+            for _ in range(file_state._MAX_PATHS_PER_AGENT + 5):
+                fd, path = tempfile.mkstemp(prefix="hermes_cap_test_")
+                with os.fdopen(fd, "w") as f:
+                    f.write("x\n")
+                tmpfiles.append(path)
+                file_state.record_read("overflow-agent", path)
+            reg = file_state.get_registry()
+            with reg._state_lock:
+                size = len(reg._reads["overflow-agent"])
+            self.assertLessEqual(size, file_state._MAX_PATHS_PER_AGENT)
+        finally:
+            for p in tmpfiles:
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
+            file_state.get_registry().clear()
+
+
 if __name__ == "__main__":
     unittest.main()
