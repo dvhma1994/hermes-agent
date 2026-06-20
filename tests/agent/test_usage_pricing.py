@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from agent.usage_pricing import (
     CanonicalUsage,
     estimate_usage_cost,
+    format_token_count_compact,
     get_pricing_entry,
     normalize_usage,
 )
@@ -250,3 +251,56 @@ def test_deepseek_v4_pro_estimate_usage_cost():
     assert result.amount_usd is not None
     # 1M input × $1.74/M + 500K output × $3.48/M = $1.74 + $1.74 = $3.48
     assert float(result.amount_usd) == 3.48
+
+
+def test_format_token_count_compact_rolls_over_unit_boundary():
+    """Rounding the mantissa to 1000 must roll into the next larger unit
+    instead of emitting a non-canonical "1000<unit>".
+
+    Regression: before this fix, 999_999 rendered as "1000K" (the :.0f format
+    rounds 999.999 up to 1000) instead of "1M".
+    """
+    assert format_token_count_compact(999_999) == "1M"
+    assert format_token_count_compact(999_500) == "1M"
+    assert format_token_count_compact(999_999_999) == "1B"
+    # Sign must survive the rollover.
+    assert format_token_count_compact(-999_999) == "-1M"
+
+
+def test_format_token_count_compact_never_emits_thousand_unit():
+    """The formatter must never emit "1000K"/"1000M"/"1000B" for any value —
+    the mantissa rolling to 1000 is exactly the bug we fixed. Sweep a wide
+    band around every unit boundary.
+    """
+    for value in range(999_400, 1_000_500):  # spans the K->M boundary
+        out = format_token_count_compact(value)
+        assert not out.endswith("1000K"), f"{value} -> {out!r}"
+        assert not out.endswith("1000M"), f"{value} -> {out!r}"
+    for value in range(999_999_400, 1_000_000_500):  # spans the M->B boundary
+        out = format_token_count_compact(value)
+        assert not out.endswith("1000M"), f"{value} -> {out!r}"
+        assert not out.endswith("1000B"), f"{value} -> {out!r}"
+    # B is the terminal unit: rollover at ~10^12 falls back to the full form
+    # rather than emitting "1000B".
+    for value in range(999_999_999_400, 1_000_000_000_500):  # spans the B->? boundary
+        out = format_token_count_compact(value)
+        assert not out.endswith("1000B"), f"{value} -> {out!r}"
+    assert format_token_count_compact(999_500_000_000) == "999,500,000,000"
+    assert format_token_count_compact(999_999_999_999) == "999,999,999,999"
+
+
+def test_format_token_count_compact_preserves_normal_values():
+    """Lock the existing (correct) format for non-boundary values."""
+    assert format_token_count_compact(0) == "0"
+    assert format_token_count_compact(999) == "999"
+    assert format_token_count_compact(1000) == "1K"
+    assert format_token_count_compact(1500) == "1.5K"
+    assert format_token_count_compact(12345) == "12.3K"
+    assert format_token_count_compact(123456) == "123K"
+    assert format_token_count_compact(999_499) == "999K"
+    assert format_token_count_compact(1_000_000) == "1M"
+    assert format_token_count_compact(1_500_000) == "1.5M"
+    assert format_token_count_compact(9_999_999) == "10M"
+    assert format_token_count_compact(99_999_999) == "100M"
+    assert format_token_count_compact(999_000_000) == "999M"
+    assert format_token_count_compact(1_000_000_000) == "1B"
