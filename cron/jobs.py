@@ -229,6 +229,15 @@ def parse_schedule(schedule: str) -> Dict[str, Any]:
     if schedule_lower.startswith("every "):
         duration_str = schedule[6:].strip()
         minutes = parse_duration(duration_str)
+        # A non-positive interval (e.g. "every 0m"/"0h"/"0d") would make
+        # next_run == now on every tick, so the scheduler fires the job on
+        # every 60s poll forever (runaway load / token spend).  Reject it at
+        # parse time — the same guard the blueprint catalog applies.
+        if minutes <= 0:
+            raise ValueError(
+                f"Invalid interval '{original}': recurring intervals must be "
+                "at least 1 minute (got 0). Use e.g. 'every 5m', 'every 2h'."
+            )
         return {
             "kind": "interval",
             "minutes": minutes,
