@@ -528,7 +528,7 @@ def _file_metadata(path: Path) -> str:
     if _is_binary_file(path):
         return f"{path.stat().st_size} bytes"
     try:
-        line_count = path.read_text(encoding="utf-8").count("\n") + 1
+        line_count = len(path.read_text(encoding="utf-8").splitlines())
     except Exception:
         return f"{path.stat().st_size} bytes"
     return f"{line_count} lines"

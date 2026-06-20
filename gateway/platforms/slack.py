@@ -1628,6 +1628,15 @@ class SlackAdapter(BasePlatformAdapter):
             text,
         )
 
+        # 4b) Protect bare http(s) URLs before escaping. Slack auto-links bare
+        #     URLs, so HTML-escaping '&' to '&amp;' inside a query string would
+        #     break the link target. Plain-text '&' outside URLs is still escaped.
+        text = re.sub(
+            r"(?<![<|])\bhttps?://[^\s<>|]+",
+            lambda m: _ph(m.group(0)),
+            text,
+        )
+
         # 5) Protect blockquote markers before escaping
         text = re.sub(r"^(>+\s)", lambda m: _ph(m.group(0)), text, flags=re.MULTILINE)
 
