@@ -1181,6 +1181,33 @@ class TestFTS5Search:
         assert s('TODO: fix').split() == ['TODO', 'fix']
         assert ':' not in s('error:timeout')
 
+    def test_sanitize_fts5_strips_bracket_at_pipe_chars(self):
+        """Regression: ``[ ] @ |`` are FTS5-special.  Left unstripped, a bare
+        query containing them raises ``sqlite3.OperationalError`` that the
+        execute site swallows into zero results (e.g. searching an email
+        address, an array index, or an ``a|b`` alternation)."""
+        from hermes_state import SessionDB
+        s = SessionDB._sanitize_fts5_query
+        for ch in "[]@|":
+            assert ch not in s(f"a{ch}b"), ch
+        assert s("arr[0]").split() == ["arr", "0"]
+        assert "@" not in s("user@domain.com")
+        assert "|" not in s("a|b")
+        # LIKE wildcards/escape used by the CJK fallback path are NOT stripped
+        assert "%" in s("100%")
+        assert "\\" in s("a\\b")
+
+    def test_search_finds_content_with_special_chars(self, db):
+        """Regression: queries containing ``[ ] @ |`` must return matching rows
+        instead of being silently swallowed into zero results."""
+        db.create_session(session_id="s1", source="cli")
+        db.append_message("s1", role="user", content="contact user@domain.com today")
+        db.append_message("s1", role="user", content="access arr[0] in the list")
+        db.append_message("s1", role="user", content="logic a|b alternation")
+        assert len(db.search_messages("user@domain.com")) >= 1
+        assert len(db.search_messages("arr[0]")) >= 1
+        assert len(db.search_messages("a|b")) >= 1
+
     def test_sanitize_fts5_preserves_quoted_phrases(self):
         """Properly paired double-quoted phrases should be preserved."""
         from hermes_state import SessionDB

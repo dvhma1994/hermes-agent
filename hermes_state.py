@@ -3382,12 +3382,16 @@ class SessionDB:
 
         sanitized = re.sub(r'"[^"]*"', _preserve_quoted, query)
 
-        # Step 2: Strip remaining (unmatched) FTS5-special characters.  ``:`` is
-        # FTS5's column-filter operator (``col:term``); since the FTS table has a
-        # single ``content`` column, an unquoted colon query like ``TODO: fix``
-        # parses as ``column:term`` and raises "no such column" — swallowed at
-        # the execute site into zero results.  Strip it like the others.
-        sanitized = re.sub(r'[+{}():\"^]', " ", sanitized)
+        # Step 2: Strip remaining (unmatched) FTS5-special characters.  FTS5's
+        # MATCH grammar gives meaning to ``+ ^ ( ) { }`` and the column-filter
+        # ``:`` (``col:term`` -> "no such column" on the single-column FTS
+        # table).  Stray punctuation a user routinely types — ``[ ] @ |`` (e.g.
+        # ``arr[0]``, ``user@host``, ``a|b``) — likewise raises
+        # ``sqlite3.OperationalError`` that the execute site swallows into zero
+        # results, so strip those too.  NOTE: ``%`` ``_`` ``\`` are deliberately
+        # left intact here — the CJK LIKE fallback path (see search_messages)
+        # escapes them as literals itself, and stripping them would break it.
+        sanitized = re.sub(r'[+{}()\[\]:\"^|@]', " ", sanitized)
 
         # Step 3: Collapse repeated * (e.g. "***") into a single one,
         # and remove leading * (prefix-only needs at least one char before *)
