@@ -435,6 +435,77 @@ class TestMarkdownStripPatch:
         assert "before" in text
 
 
+    def test_heading_before_code_block_style_offsets(self):
+        """Regression: a heading marker stripped before a fenced code block
+        must not shift the MONOSPACE range off its characters.
+
+        Before the fix, Phase 1 recorded the MONOSPACE offset against text
+        that still contained '# '.  Phase 2 then stripped '# ' (2 chars)
+        without adjusting Phase 1 offsets, so the MONOSPACE range landed
+        past the end of the final text and was silently dropped by the
+        final out-of-bounds safety check.
+
+        This is a common pattern in agent replies: a markdown heading
+        immediately preceding a fenced code block.
+        """
+        md = "# Results\n```\nprint(1)\n```"
+        text, styles = _m2s(md)
+        assert text == "Results\nprint(1)"
+
+        # There must be a MONOSPACE range, and it must cover exactly 'print(1)'
+        mono_styles = _find_style(styles, "MONOSPACE")
+        assert len(mono_styles) == 1, f"expected 1 MONOSPACE range, got {mono_styles}"
+        parts = mono_styles[0].split(":")
+        start, length = int(parts[0]), int(parts[1])
+        enc = text.encode("utf-16-le")
+        covered = enc[start * 2 : (start + length) * 2].decode("utf-16-le")
+        assert covered == "print(1)", (
+            f"MONOSPACE range should cover 'print(1)' in final text, "
+            f"got {covered!r} at offset {start} length {length}"
+        )
+
+        # The BOLD heading range must still cover 'Results' (not corrupted)
+        bold_styles = _find_style(styles, "BOLD")
+        assert len(bold_styles) == 1, f"expected 1 BOLD range, got {bold_styles}"
+        bparts = bold_styles[0].split(":")
+        bstart, blength = int(bparts[0]), int(bparts[1])
+        bcovered = enc[bstart * 2 : (bstart + blength) * 2].decode("utf-16-le")
+        assert bcovered == "Results", (
+            f"BOLD range should cover 'Results', got {bcovered!r}"
+        )
+
+    def test_multiple_headings_with_code_block_offsets(self):
+        """Two headings around a fenced code block — both BOLD ranges and
+        the MONOSPACE range must land on the correct final-text characters."""
+        md = "# Top\n```\nabc\n```\n## Bottom"
+        text, styles = _m2s(md)
+        assert text == "Top\nabc\nBottom"
+
+        enc = text.encode("utf-16-le")
+        def covered(style_str):
+            p = style_str.split(":")
+            s, l = int(p[0]), int(p[1])
+            return enc[s * 2 : (s + l) * 2].decode("utf-16-le")
+
+        bolds = _find_style(styles, "BOLD")
+        monos = _find_style(styles, "MONOSPACE")
+        assert {covered(s) for s in bolds} == {"Top", "Bottom"}
+        assert {covered(s) for s in monos} == {"abc"}
+
+    def test_h3_heading_before_code_block(self):
+        """### marker (4 chars stripped) before a code block."""
+        md = "### Section\n```\ncode\n```"
+        text, styles = _m2s(md)
+        assert text == "Section\ncode"
+        enc = text.encode("utf-16-le")
+        mono = _find_style(styles, "MONOSPACE")
+        assert len(mono) == 1
+        parts = mono[0].split(":")
+        s, l = int(parts[0]), int(parts[1])
+        covered = enc[s * 2 : (s + l) * 2].decode("utf-16-le")
+        assert covered == "code"
+
+
 # ===========================================================================
 # signal-streaming-patch: SUPPORTS_MESSAGE_EDITING and send() behavior
 # ===========================================================================

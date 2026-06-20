@@ -54,11 +54,16 @@ def markdown_to_signal(text: str) -> tuple[str, list[str]]:
         text = text[: match.start()] + inner + text[match.end() :]
         styles.append((start, len(inner), "MONOSPACE"))
 
+    prior_style_count = len(styles)
+
     heading = re.compile(r"^#{1,6}\s+", re.MULTILINE)
+    heading_removals: list[tuple[int, int]] = []
     new_text = ""
     last_end = 0
     for match in heading.finditer(text):
         new_text += text[last_end : match.start()]
+        marker_len = match.end() - match.start()
+        heading_removals.append((match.start(), marker_len))
         last_end = match.end()
         eol = text.find("\n", match.end())
         if eol == -1:
@@ -70,6 +75,24 @@ def markdown_to_signal(text: str) -> tuple[str, list[str]]:
         last_end = eol
     new_text += text[last_end:]
     text = new_text
+
+    if heading_removals:
+        def _heading_shift(pos: int) -> int:
+            shift = 0
+            for heading_pos, heading_len in heading_removals:
+                if heading_pos + heading_len <= pos:
+                    shift += heading_len
+                elif heading_pos < pos:
+                    shift += pos - heading_pos
+            return pos - shift
+
+        adjusted_prior: list[tuple[int, int, str]] = []
+        for start, length, style in styles[:prior_style_count]:
+            new_start = _heading_shift(start)
+            new_end = _heading_shift(start + length)
+            if new_end > new_start:
+                adjusted_prior.append((new_start, new_end - new_start, style))
+        styles = adjusted_prior + styles[prior_style_count:]
 
     patterns = [
         (re.compile(r"\*\*(.+?)\*\*", re.DOTALL), "BOLD"),
