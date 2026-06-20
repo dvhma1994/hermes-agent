@@ -2577,6 +2577,34 @@ class TestSchemaInit:
         assert sessions[0]["preview"] == "first prompt"
         db.close()
 
+    def test_list_unlinked_telegram_sessions_multimodal_preview(self, tmp_path):
+        """Multimodal first user message (text + image, sentinel-prefixed on
+        storage) must surface its text part in the unlinked-session picker
+        preview. Telegram is a channel where a photo+caption first message is
+        common, so this SUBSTR/NUL-sentinel blank-preview bug is high-impact
+        here. Regression for the same bug class as list_sessions_rich."""
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session(
+            session_id="photo-session",
+            source="telegram",
+            user_id="208214988",
+        )
+        db.append_message(
+            "photo-session",
+            "user",
+            content=[
+                {"type": "text", "text": "What is in this photo?"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+            ],
+        )
+        sessions = db.list_unlinked_telegram_sessions_for_user(
+            chat_id="208214988",
+            user_id="208214988",
+        )
+        assert [s["id"] for s in sessions] == ["photo-session"]
+        assert "What is in this photo?" in sessions[0]["preview"]
+        db.close()
+
     def test_migration_from_v2(self, tmp_path):
         """Simulate a v2 database and verify migration adds title column."""
         import sqlite3
@@ -3015,6 +3043,48 @@ class TestListSessionsRich:
         db.append_message("s1", "system", "System prompt")
         sessions = db.list_sessions_rich()
         assert sessions[0]["preview"] == ""
+
+    def test_preview_extracts_text_from_multimodal_first_message(self, db):
+        """A multimodal first user message (list of content parts, e.g.
+        text + image_url) is stored sentinel-prefixed (``\\x00json:...``) by
+        ``_encode_content``. SQLite's SUBSTR treats the leading NUL as
+        end-of-string, so the SQL preview subquery returns ``''`` — the row
+        showed a blank preview even though the message has clear user text.
+
+        The preview must surface the text part of a multimodal message.
+        Regression for the blank-multimodal-preview bug.
+        """
+        db.create_session("s1", "cli")
+        db.append_message(
+            "s1",
+            "user",
+            content=[
+                {"type": "text", "text": "Here is my screenshot, please analyze it"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+            ],
+        )
+        sessions = db.list_sessions_rich()
+        assert len(sessions) == 1
+        preview = sessions[0]["preview"]
+        # The text part must be surfaced, not a blank/empty string.
+        assert preview, f"expected non-empty preview for multimodal message, got {preview!r}"
+        assert "Here is my screenshot, please analyze it" in preview
+
+    def test_preview_extracts_text_from_multimodal_via_get_session_rich_row(self, db):
+        """``_get_session_rich_row`` shares the SUBSTR preview path and must
+        also surface the text part of a multimodal first user message."""
+        db.create_session("s1", "cli")
+        db.append_message(
+            "s1",
+            "user",
+            content=[
+                {"type": "text", "text": "Describe this diagram"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,BBBB"}},
+            ],
+        )
+        row = db._get_session_rich_row("s1")
+        assert row is not None
+        assert "Describe this diagram" in row["preview"]
 
     def test_last_active_from_latest_message(self, db):
         import time
