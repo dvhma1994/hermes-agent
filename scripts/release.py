@@ -82,6 +82,7 @@ AUTHOR_MAP = {
     "ondrej.drapalik@gmail.com": "OndrejDrapalik",
     "tomasz.panek@gmail.com": "tomekpanek",
     "philipadsouza@gmail.com": "PhilipAD",
+    "hermes@eng.local": "dvhma1994",
     "zhuhaoyu0909@icloud.com": "underthestars-zhy",
     "raysun12142006@gmail.com": "yanxue06",
     "hermes@eng.local": "dvhma1994",
