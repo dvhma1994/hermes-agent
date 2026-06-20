@@ -843,6 +843,9 @@ class SignalAdapter(BasePlatformAdapter):
         styles: list = []
 
         # --- Phase 1: fenced code blocks  ```...``` → MONOSPACE ---
+        # NOTE: offsets recorded here are against the current *text*, which
+        # still contains heading markers.  Phase 2 strips those markers and
+        # must adjust any Phase 1 offsets that fall at/after a heading.
         _CB = re.compile(r"```[a-zA-Z0-9_+-]*\n?(.*?)```", re.DOTALL)
         while m := _CB.search(text):
             inner = m.group(1).rstrip("\n")
@@ -850,12 +853,24 @@ class SignalAdapter(BasePlatformAdapter):
             text = text[: m.start()] + inner + text[m.end() :]
             styles.append((start, len(inner), "MONOSPACE"))
 
+        # Styles recorded so far are in pre-heading-strip coordinates.  Phase 2
+        # below adds its own BOLD ranges against the *post*-strip text, so we
+        # must only adjust the earlier ranges, not the new ones.
+        prior_style_count = len(styles)
+
         # --- Phase 2: heading markers  # Foo → Foo (BOLD) ---
+        # Removing the heading marker ("# " etc.) shifts every character at
+        # and after the marker left by marker_len.  Style ranges recorded in
+        # Phase 1 that sit at/after a heading must be shifted the same amount
+        # so they keep pointing at the correct characters in the final text.
         _HEADING = re.compile(r"^#{1,6}\s+", re.MULTILINE)
+        heading_removals: list = []  # (marker_start, marker_len) to adjust prior styles
         new_text = ""
         last_end = 0
         for m in _HEADING.finditer(text):
             new_text += text[last_end : m.start()]
+            marker_len = m.end() - m.start()
+            heading_removals.append((m.start(), marker_len))
             last_end = m.end()
             eol = text.find("\n", m.end())
             if eol == -1:
@@ -867,6 +882,30 @@ class SignalAdapter(BasePlatformAdapter):
             last_end = eol
         new_text += text[last_end:]
         text = new_text
+
+        # Adjust Phase 1 styles (and only Phase 1 styles — the BOLD ranges
+        # just above were already recorded against the post-strip text) for
+        # the heading markers just removed.  A style range [s, s+l) is shifted
+        # left by the total length of all heading markers that fall fully
+        # before s (i.e. were removed to the left of the range).
+        if heading_removals:
+            def _heading_shift(pos: int) -> int:
+                shift = 0
+                for hp, hl in heading_removals:
+                    if hp + hl <= pos:
+                        shift += hl
+                    elif hp < pos:
+                        # range starts inside a heading marker — clamp to end
+                        shift += pos - hp
+                return pos - shift
+
+            adjusted_prior: list = []
+            for s, l, st in styles[:prior_style_count]:
+                ns = _heading_shift(s)
+                ne = _heading_shift(s + l)
+                if ne > ns:
+                    adjusted_prior.append((ns, ne - ns, st))
+            styles = adjusted_prior + styles[prior_style_count:]
 
         # --- Phase 3: inline patterns (single-pass to avoid offset drift) ---
         # The old code processed each pattern sequentially, stripping markers
