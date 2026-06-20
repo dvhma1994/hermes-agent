@@ -104,6 +104,7 @@ _PREFIX_PATTERNS = [
     r"mem0_[A-Za-z0-9]{10,}",           # Mem0 Platform API key
     r"brv_[A-Za-z0-9]{10,}",            # ByteRover API key
     r"xai-[A-Za-z0-9]{30,}",            # xAI (Grok) API key
+    r"ntn_[A-Za-z0-9]{10,}",            # Notion internal integration token
 ]
 
 # ENV assignment patterns: KEY=value where KEY contains a secret-like name
@@ -237,7 +238,14 @@ def mask_secret(
         return empty
     if len(value) < floor:
         return placeholder
-    return f"{value[:head]}...{value[-tail:]}"
+    # Guard against ``head``/``tail`` of 0 (or negative). ``value[-tail:]``
+    # when ``tail == 0`` evaluates to ``value[-0:]`` == ``value[0:]`` — i.e.
+    # the *entire* string — because Python treats ``-0`` as ``0``. For a
+    # masking helper that would silently leak the full secret, so build the
+    # prefix/suffix only when the count is positive.
+    prefix = value[:head] if head > 0 else ""
+    suffix = value[-tail:] if tail > 0 else ""
+    return f"{prefix}...{suffix}"
 
 
 def _mask_token(token: str) -> str:
