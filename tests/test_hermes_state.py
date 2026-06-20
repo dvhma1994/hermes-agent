@@ -1977,6 +1977,85 @@ class TestDeleteEmptySessions:
         assert not transcript.exists()
 
 
+class TestPruneEmptyGhostSessions:
+    """``prune_empty_ghost_sessions`` sweeps TUI ghost sessions — empty
+    (no messages, no title), ended, and older than 24h. Backs the CLI's
+    one-time startup cleanup gated on the ``ghost_session_prune_v1`` meta
+    key (~``cli.py``).
+
+    Regression coverage for the orphaning bug: the original implementation
+    issued ``DELETE FROM sessions WHERE id IN (...)`` with no prior
+    ``UPDATE ... SET parent_session_id = NULL``. With
+    ``PRAGMA foreign_keys=ON`` (the SessionDB default), deleting a ghost
+    that still has a child referencing it raised
+    ``sqlite3.IntegrityError: FOREIGN KEY constraint failed``, which
+    propagated out of ``_execute_write`` and rolled back the whole batch —
+    so no ghost was ever pruned and the one-time meta flag was never set,
+    silently re-failing on every startup. The fix mirrors
+    ``delete_session`` / ``delete_sessions`` / ``prune_sessions``: orphan
+    children before deleting the parent rows.
+    """
+
+    def _backdate_tui_ghost(self, db, session_id, parent=None):
+        """Create an ended, >24h-old, title-less TUI ghost with no
+        messages — exactly the shape the prune query targets."""
+        db.create_session(
+            session_id=session_id, source="tui", parent_session_id=parent
+        )
+        old = time.time() - (25 * 3600)  # 25h ago → past the 24h cutoff
+        with db._lock:
+            db._conn.execute(
+                "UPDATE sessions SET started_at = ?, ended_at = ?, "
+                "end_reason = 'ghost' WHERE id = ?",
+                (old, old, session_id),
+            )
+
+    def test_prunes_ghost_and_orphans_child_without_fk_error(self, db):
+        """The exact repro: an empty TUI ghost parent referenced by a
+        live child. Before the fix this raised IntegrityError and pruned
+        nothing; after the fix the ghost is removed and the child is
+        orphaned (``parent_session_id → NULL``)."""
+        # Sanity: FK enforcement is the SessionDB default — without it
+        # the bug wouldn't manifest.
+        assert db._conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+
+        self._backdate_tui_ghost(db, "parent")
+        db.create_session(
+            session_id="child", source="cli", parent_session_id="parent"
+        )
+        db.append_message("child", role="user", content="hi")
+        db.end_session("child", end_reason="done")
+
+        # Must not raise IntegrityError.
+        removed = db.prune_empty_ghost_sessions()
+
+        assert removed == 1
+        assert db.get_session("parent") is None
+        child = db.get_session("child")
+        assert child is not None
+        # Child survives and is re-parented to NULL, not cascade-deleted.
+        assert child["parent_session_id"] is None
+
+    def test_no_ghosts_returns_zero(self, db):
+        """No candidate rows → return 0, no error (happy no-op path)."""
+        db.create_session(session_id="keep", source="tui")
+        db.append_message("keep", role="user", content="msg")
+        db.end_session("keep", end_reason="done")
+
+        assert db.prune_empty_ghost_sessions() == 0
+        assert db.get_session("keep") is not None
+
+    def test_skips_recent_ghost_inside_24h_window(self, db):
+        """A ghost younger than the 24h cutoff must survive — the prune
+        is for stale, abandoned sessions, not one the TUI may still
+        resume this hour."""
+        db.create_session(session_id="fresh", source="tui")
+        db.end_session("fresh", end_reason="ghost")  # ended_at = now
+
+        assert db.prune_empty_ghost_sessions() == 0
+        assert db.get_session("fresh") is not None
+
+
 # =========================================================================
 # Schema and WAL mode
 # =========================================================================

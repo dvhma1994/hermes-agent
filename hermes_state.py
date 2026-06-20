@@ -1702,6 +1702,17 @@ class SessionDB:
             ids = [r[0] if isinstance(r, (tuple, list)) else r["id"] for r in rows]
             if ids:
                 placeholders = ",".join("?" * len(ids))
+                # Orphan any child sessions that reference the ghosts BEFORE
+                # the DELETE, mirroring delete_session / delete_sessions /
+                # prune_sessions. Without this, PRAGMA foreign_keys=ON turns
+                # the DELETE into a FOREIGN KEY constraint failure that rolls
+                # back the whole batch (so no ghost is ever pruned and the
+                # one-time ``ghost_session_prune_v1`` meta flag is never set).
+                conn.execute(
+                    f"UPDATE sessions SET parent_session_id = NULL "
+                    f"WHERE parent_session_id IN ({placeholders})",
+                    ids,
+                )
                 conn.execute(
                     f"DELETE FROM sessions WHERE id IN ({placeholders})", ids
                 )
