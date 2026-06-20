@@ -163,6 +163,28 @@ class TestSessionResetPolicy:
         restored = SessionResetPolicy.from_dict({"notify": "false"})
         assert restored.notify is False
 
+    def test_from_dict_coerces_quoted_numeric_values(self):
+        # YAML quoted scalars arrive as str; from_dict must coerce to int so
+        # _validate_gateway_config's `0 <= at_hour <= 23` and the idle-minute
+        # arithmetic in run.py do not raise TypeError. Mirrors the numeric
+        # coercion already applied to StreamingConfig fields.
+        restored = SessionResetPolicy.from_dict(
+            {"mode": "daily", "at_hour": "4", "idle_minutes": "30"}
+        )
+        assert restored.at_hour == 4
+        assert isinstance(restored.at_hour, int)
+        assert restored.idle_minutes == 30
+        assert isinstance(restored.idle_minutes, int)
+
+    def test_from_dict_malformed_numeric_values_fall_back_to_defaults(self):
+        restored = SessionResetPolicy.from_dict(
+            {"at_hour": "oops", "idle_minutes": "nope"}
+        )
+        assert restored.at_hour == 4
+        assert isinstance(restored.at_hour, int)
+        assert restored.idle_minutes == 1440
+        assert isinstance(restored.idle_minutes, int)
+
 
 class TestStreamingConfig:
     def test_defaults_to_auto_transport(self):
@@ -322,6 +344,32 @@ class TestLoadGatewayConfig:
         config = load_gateway_config()
 
         assert config.group_sessions_per_user is False
+
+    def test_quoted_session_reset_numeric_does_not_raise(self, tmp_path, monkeypatch):
+        # Regression: a quoted YAML scalar (at_hour: "4") loads as a str, and
+        # _validate_gateway_config's `0 <= policy.at_hour <= 23` raised
+        # TypeError, aborting gateway startup. load_gateway_config must coerce.
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        config_path = hermes_home / "config.yaml"
+        config_path.write_text(
+            "session_reset:\n"
+            "  mode: daily\n"
+            '  at_hour: "4"\n'
+            '  idle_minutes: "30"\n',
+            encoding="utf-8",
+        )
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        config = load_gateway_config()
+
+        policy = config.default_reset_policy
+        assert policy.mode == "daily"
+        assert policy.at_hour == 4
+        assert isinstance(policy.at_hour, int)
+        assert policy.idle_minutes == 30
+        assert isinstance(policy.idle_minutes, int)
 
     def test_bridges_thread_sessions_per_user_from_config_yaml(self, tmp_path, monkeypatch):
         hermes_home = tmp_path / ".hermes"

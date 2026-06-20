@@ -307,8 +307,8 @@ class SessionResetPolicy:
         exclude = data.get("notify_exclude_platforms")
         return cls(
             mode=mode if mode is not None else "both",
-            at_hour=at_hour if at_hour is not None else 4,
-            idle_minutes=idle_minutes if idle_minutes is not None else 1440,
+            at_hour=_coerce_int(at_hour, 4),
+            idle_minutes=_coerce_int(idle_minutes, 1440),
             notify=_coerce_bool(notify, True),
             notify_exclude_platforms=tuple(exclude) if exclude is not None else ("api_server", "webhook"),
         )
