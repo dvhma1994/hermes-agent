@@ -509,6 +509,38 @@ class TestGenerateSummary:
         assert summary == "[CONTEXT SUMMARY]:"
 
 
+class TestEnsureSummaryPrefix:
+    """_ensure_summary_prefix must include the prefix *exactly once*, even
+    when the summarization LLM returns it in non-canonical casing."""
+
+    @staticmethod
+    def _call(summary):
+        return TrajectoryCompressor._ensure_summary_prefix(summary)
+
+    def test_canonical_prefix_preserved(self):
+        assert self._call("[CONTEXT SUMMARY]: hello") == "[CONTEXT SUMMARY]: hello"
+
+    def test_no_prefix_prepended_once(self):
+        assert self._call("hello world") == "[CONTEXT SUMMARY]: hello world"
+
+    def test_lowercase_prefix_not_duplicated(self):
+        # The docstring promises the prefix appears "exactly once". A
+        # case-insensitive check must normalise a differently-cased prefix
+        # instead of prepending a second one.
+        result = self._call("[context summary]: hello")
+        assert result == "[CONTEXT SUMMARY]: hello"
+        assert result.count("[CONTEXT SUMMARY]:") == 1
+
+    def test_titlecase_prefix_not_duplicated(self):
+        result = self._call("[Context Summary]: hello")
+        assert result == "[CONTEXT SUMMARY]: hello"
+        assert result.count("[CONTEXT SUMMARY]:") == 1
+
+    def test_empty_returns_bare_prefix(self):
+        assert self._call("") == "[CONTEXT SUMMARY]:"
+        assert self._call(None) == "[CONTEXT SUMMARY]:"
+
+
 # ---------------------------------------------------------------------------
 # TrajectoryCompressor — compression boundary must not split tool pairs
 # ---------------------------------------------------------------------------
