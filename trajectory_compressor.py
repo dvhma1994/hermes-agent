@@ -602,10 +602,14 @@ class TrajectoryCompressor:
     @staticmethod
     def _ensure_summary_prefix(summary: str) -> str:
         """Normalize summary text to include the expected prefix exactly once."""
+        PREFIX = "[CONTEXT SUMMARY]:"
         text = (summary or "").strip()
-        if text.startswith("[CONTEXT SUMMARY]:"):
-            return text
-        return "[CONTEXT SUMMARY]:" if not text else f"[CONTEXT SUMMARY]: {text}"
+        # Case-insensitive: the summarization LLM is prompted for the prefix
+        # but may return it in a different casing. A plain startswith() would
+        # miss that and prepend a second prefix, violating "exactly once".
+        if text[: len(PREFIX)].upper() == PREFIX:
+            return PREFIX + text[len(PREFIX):]
+        return PREFIX if not text else f"{PREFIX} {text}"
     
     def _generate_summary(self, content: str, metrics: TrajectoryMetrics) -> str:
         """
