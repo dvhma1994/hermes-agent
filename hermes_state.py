@@ -2169,7 +2169,7 @@ class SessionDB:
                 text = raw[:60]
                 s["preview"] = text + ("..." if len(raw) > 60 else "")
             else:
-                s["preview"] = ""
+                s["preview"] = self._extract_first_user_preview(s["id"])
             # Drop the internal ordering column so callers see a clean dict.
             s.pop("_effective_last_active", None)
             sessions.append(s)
@@ -2272,7 +2272,7 @@ class SessionDB:
                 text = raw[:60]
                 s["preview"] = text + ("..." if len(raw) > 60 else "")
             else:
-                s["preview"] = ""
+                s["preview"] = self._extract_first_user_preview(s["id"])
             runs.append(s)
         return runs
 
@@ -2308,7 +2308,7 @@ class SessionDB:
             text = raw[:60]
             s["preview"] = text + ("..." if len(raw) > 60 else "")
         else:
-            s["preview"] = ""
+            s["preview"] = self._extract_first_user_preview(s["id"])
         return s
 
     # =========================================================================
@@ -2356,6 +2356,54 @@ class SessionDB:
                 )
                 return content
         return content
+
+    def _extract_first_user_preview(self, session_id: str) -> str:
+        """Build a human-readable preview of a session's first user message.
+
+        The SQL preview subquery used by :meth:`list_sessions_rich`,
+        :meth:`list_cron_runs`/:meth:`list_sessions_for_cron_job` and
+        :meth:`_get_session_rich_row` builds the preview with
+        ``SUBSTR(m.content, 1, 63)``. SQLite's string functions use C-string
+        (NUL-terminated) semantics, so a value beginning with the ``\\x00json:``
+        sentinel written by :meth:`_encode_content` for structured (list/dict,
+        e.g. multimodal) content appears to be **zero-length** and SUBSTR
+        returns ``''`` — yielding a blank preview even when the message carries
+        clear user text.
+
+        This helper reads the raw stored content and decodes it via
+        :meth:`_decode_content`, then flattens the text part(s). It mirrors the
+        ordering used by those preview subqueries (first user message,
+        ``ORDER BY timestamp, id``) and is the fallback path the SQL preview
+        cannot serve.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT content FROM messages "
+                "WHERE session_id = ? AND role = 'user' AND content IS NOT NULL "
+                "ORDER BY timestamp, id LIMIT 1",
+                (session_id,),
+            ).fetchone()
+        if not row:
+            return ""
+        decoded = self._decode_content(row["content"])
+        if isinstance(decoded, list):
+            text_parts = [
+                p.get("text", "")
+                for p in decoded
+                if isinstance(p, dict) and p.get("type") == "text"
+            ]
+            text = " ".join(t for t in text_parts if t).strip()
+        elif isinstance(decoded, str):
+            text = decoded
+        elif isinstance(decoded, dict):
+            t = decoded.get("text", "")
+            text = t if isinstance(t, str) else ""
+        else:
+            text = ""
+        text = " ".join(text.split())  # collapse newlines/whitespace
+        if len(text) > 60:
+            text = text[:60] + "..."
+        return text
 
     def append_message(
         self,
@@ -4507,7 +4555,10 @@ class SessionDB:
         for row in rows:
             session = dict(row)
             raw = str(session.pop("_preview_raw", "") or "").strip()
-            session["preview"] = raw[:60] + ("..." if len(raw) > 60 else "") if raw else ""
+            if raw:
+                session["preview"] = raw[:60] + ("..." if len(raw) > 60 else "")
+            else:
+                session["preview"] = self._extract_first_user_preview(session["id"])
             sessions.append(session)
         return sessions
 
