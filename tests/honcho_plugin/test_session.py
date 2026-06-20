@@ -1542,15 +1542,25 @@ class TestDialecticLifecycleSmoke:
     def _await_thread(self, provider):
         """Block until the in-flight prefetch/prewarm thread has fully finished.
 
-        The earlier version did a single ``join(timeout=3.0)`` and then
-        proceeded regardless of whether the thread had actually finished. On a
-        loaded CI runner (6 parallel test slices), the background dialectic
-        thread's completion can slip past that 3s window, so the join times out
-        silently and the test reads ``_prefetch_result`` before the worker wrote
-        it — a flaky ``session-start prewarm must land`` failure. We instead join
-        in a loop up to a generous ceiling and assert the thread is dead, so a
-        genuine hang surfaces as a clear, non-flaky failure instead of a race.
+        initialize() launches a background ``_init_thread`` (honcho-session-init)
+        that itself starts the prewarm thread (``_prefetch_thread``).  On a
+        loaded CI runner the session-init thread may not have set
+        ``_prefetch_thread`` yet when we first read it, so we must wait for
+        ``_init_thread`` first and only then read and wait for ``_prefetch_thread``.
+        Both joins loop up to a generous 30s ceiling so a genuine hang surfaces
+        as a clear failure instead of a silent early return.
         """
+        # Step 1: wait for the session-init thread, which spawns the prewarm thread.
+        init_thread = getattr(provider, "_init_thread", None)
+        if init_thread is not None:
+            deadline = time.monotonic() + 30.0
+            while init_thread.is_alive() and time.monotonic() < deadline:
+                init_thread.join(timeout=1.0)
+            assert not init_thread.is_alive(), (
+                "_init_thread did not finish within 30s — "
+                "this is a real hang, not a timing flake"
+            )
+        # Step 2: re-read _prefetch_thread — _init_thread may have set it above.
         thread = provider._prefetch_thread
         if thread is None:
             return
@@ -1558,7 +1568,7 @@ class TestDialecticLifecycleSmoke:
         while thread.is_alive() and time.monotonic() < deadline:
             thread.join(timeout=1.0)
         assert not thread.is_alive(), (
-            "prefetch/prewarm thread did not finish within 30s — "
+            "_prefetch_thread did not finish within 30s — "
             "this is a real hang, not a timing flake"
         )
 
@@ -1586,13 +1596,17 @@ class TestDialecticLifecycleSmoke:
         mgr.dialectic_query.side_effect = lambda *a, **kw: next(responses)
 
         # ---- init: prewarm fires ----
+        # _await_thread must be called inside the patch context: initialize()
+        # starts a background _init_thread (honcho-session-init) that re-imports
+        # get_honcho_client and HonchoSessionManager.  If the context has already
+        # exited when the thread runs, those imports resolve to the real symbols
+        # and the thread fails silently without ever setting _prefetch_thread.
         with patch("plugins.memory.honcho.client.HonchoClientConfig.from_global_config", return_value=cfg), \
              patch("plugins.memory.honcho.client.get_honcho_client", return_value=MagicMock()), \
              patch("plugins.memory.honcho.session.HonchoSessionManager", return_value=mgr), \
              patch("hermes_constants.get_hermes_home", return_value=MagicMock()):
             provider.initialize(session_id="smoke-test")
-
-        self._await_thread(provider)
+            self._await_thread(provider)
         with provider._prefetch_lock:
             assert provider._prefetch_result.startswith("prewarm"), \
                 "session-start prewarm must land in _prefetch_result"
