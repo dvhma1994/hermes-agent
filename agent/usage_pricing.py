@@ -903,6 +903,20 @@ def format_token_count_compact(value: int) -> str:
                 text = f"{scaled:.0f}"
             if "." in text:
                 text = text.rstrip("0").rstrip(".")
+            # Promote across a unit boundary when rounding pushes the
+            # coefficient to >=1000 in the current unit (e.g. 999999 / 1000
+            # == 999.999 rounds to "1000", which must render as "1M" not
+            # "1000K"). Walk up to the next larger unit; if there is no
+            # larger unit (already at "B"), fall back to the full
+            # thousands-separated integer below.
+            if float(text) >= 1000:
+                unit_index = next(
+                    i for i, (_, sfx) in enumerate(units) if sfx == suffix
+                )
+                if unit_index > 0:
+                    next_suffix = units[unit_index - 1][1]
+                    return f"{sign}1{next_suffix}"
+                break
             return f"{sign}{text}{suffix}"
 
     return f"{value:,}"
