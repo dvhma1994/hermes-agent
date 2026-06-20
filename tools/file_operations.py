@@ -1073,12 +1073,28 @@ class ShellFileOperations(FileOperations):
         if offset == 1:
             read_output, _ = _strip_bom(read_output)
         
-        # Get total line count
-        wc_cmd = f"wc -l < {self._escape_shell_arg(path)}"
-        wc_result = self._exec(wc_cmd)
-        wc_output = _strip_terminal_fence_leaks(wc_result.stdout)
+        # Get total line count.
+        #
+        # ``wc -l`` counts *newlines*, not lines — a non-empty file whose
+        # last line has no trailing newline is undercounted by 1 (a 10-line
+        # file ending in "...line10" reports 9).  That undercount then makes
+        # the ``truncated`` check below wrong (``total_lines > end_line`` is
+        # false when it should be true), so the "use offset=..." continuation
+        # hint is never emitted and the model silently never sees the final
+        # ``awk 'END{print NR}'`` counts *records* (lines), which is
+        # newline-agnostic: a trailing-newline file reports the same value
+        # as ``wc -l``, a no-trailing-newline file reports one more, and an
+        # empty file reports 0 — exactly the semantics we need.
+        #
+        # The shell redirect (``< {path}``) is used rather than passing the
+        # path as an awk argument so a file literally named ``-`` is opened
+        # by the shell instead of being interpreted by awk as stdin —
+        # matching the original ``wc -l < {path}`` behaviour for every path.
+        count_cmd = f"awk 'END{{print NR}}' < {self._escape_shell_arg(path)}"
+        count_result = self._exec(count_cmd)
+        count_output = _strip_terminal_fence_leaks(count_result.stdout)
         try:
-            total_lines = int(wc_output.strip())
+            total_lines = int(count_output.strip())
         except ValueError:
             total_lines = 0
         
