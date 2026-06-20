@@ -90,6 +90,17 @@ class TestParseSchedule:
         assert result["kind"] == "interval"
         assert result["minutes"] == 30
 
+    def test_zero_interval_rejected(self):
+        # A non-positive interval makes next_run == now on every tick, so the
+        # scheduler would fire the job on every 60s poll forever (runaway).
+        for sched in ("every 0m", "every 0h", "every 0d", "EVERY 0M"):
+            with pytest.raises(ValueError):
+                parse_schedule(sched)
+
+    def test_positive_interval_still_accepted(self):
+        assert parse_schedule("every 1m")["minutes"] == 1
+        assert parse_schedule("every 90m")["minutes"] == 90
+
     def test_cron_expression(self):
         pytest.importorskip("croniter")
         result = parse_schedule("0 9 * * *")
