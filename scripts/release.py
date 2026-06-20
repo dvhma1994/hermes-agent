@@ -1540,6 +1540,7 @@ AUTHOR_MAP = {
     "desg38@gmail.com": "dschnurbusch",  # PR #42373 salvage (archive compressed conversation lineages)
     "bsmith@bramarstrategicservices.com": "bcsmith528",  # PR #20589 salvage (register_slack_action_handler plugin API)
     "sunsky.lau@gmail.com": "liuhao1024",  # PR #45494 salvage (claim session slot before auto-resume task; #45456)
+    "hermes@eng.local": "dvhma1994",  # PR #8 (fix usage_pricing token-count unit boundary promotion)
 }
 
 
