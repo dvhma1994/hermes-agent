@@ -22,6 +22,46 @@ def test_backoff_respects_max_delay():
         assert delay <= 60.0, f"attempt {attempt}: delay {delay} exceeds max 60s"
 
 
+def test_backoff_respects_max_delay_with_jitter():
+    """Delay should never exceed max_delay even when jitter is enabled.
+
+    The docstring states max_delay is the 'Maximum delay cap in seconds'.
+    Previously jitter was added *after* capping, so the return value could
+    exceed max_delay by up to jitter_ratio * max_delay.
+    """
+    for attempt in (1, 5, 10, 20, 100):
+        delays = [
+            jittered_backoff(attempt, base_delay=5.0, max_delay=60.0, jitter_ratio=0.5)
+            for _ in range(200)
+        ]
+        worst = max(delays)
+        assert worst <= 60.0, (
+            f"attempt {attempt}: max delay {worst} exceeds max_delay 60.0 "
+            f"(jitter pushed past the cap)"
+        )
+
+
+def test_backoff_decorrelates_at_saturation():
+    """At the cap, jitter must still vary so retries don't thunder in lockstep.
+
+    This guards against a naive fix that clamps the final value (which
+    collapses every saturated call to exactly max_delay, defeating the
+    module's anti-thundering-herd purpose at the exact moment repeated
+    failures make decorrelation matter most).
+    """
+    for attempt in (6, 10, 20):
+        delays = [
+            jittered_backoff(attempt, base_delay=5.0, max_delay=60.0, jitter_ratio=0.5)
+            for _ in range(100)
+        ]
+        assert all(d <= 60.0 for d in delays), "cap must hold"
+        spread = max(delays) - min(delays)
+        assert spread > 1.0, (
+            f"attempt {attempt}: zero decorrelation at the cap "
+            f"(spread {spread:.4f}); jitter is being discarded"
+        )
+
+
 def test_backoff_adds_jitter():
     """With jitter enabled, delays should vary across calls."""
     delays = [jittered_backoff(1, base_delay=10.0, max_delay=120.0, jitter_ratio=0.5) for _ in range(50)]

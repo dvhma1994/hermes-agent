@@ -2136,6 +2136,38 @@ class TestFormatMessage:
         )
         assert result == "<https://en.wikipedia.org/wiki/Foo_(bar)|Foo>"
 
+    def test_bare_url_with_ampersand_query_param_not_escaped(self, adapter):
+        """Bare URLs (not markdown links) with '&' in query params must keep
+        the '&' literal.
+
+        Slack auto-detects bare URLs and renders them as clickable links.
+        HTML-escaping '&' to '&amp;' inside the URL produces a broken link
+        that navigates to the wrong page.  See step 4b in format_message.
+        """
+        result = adapter.format_message(
+            "Visit https://example.com/search?q=hello&sort=desc for results"
+        )
+        assert "https://example.com/search?q=hello&sort=desc" in result
+        assert "&amp;" not in result
+
+    def test_bare_url_multiple_query_params_preserved(self, adapter):
+        """Multiple '&' query separators in a bare URL are all preserved."""
+        result = adapter.format_message("See https://example.com/?a=1&b=2&c=3")
+        assert "https://example.com/?a=1&b=2&c=3" in result
+        assert "&amp;" not in result
+
+    def test_plain_ampersand_still_escaped_without_url(self, adapter):
+        """Plain-text '&' not part of a URL is still HTML-escaped."""
+        assert adapter.format_message("AT&T") == "AT&amp;T"
+
+    def test_plain_ampersand_after_bare_url_still_escaped(self, adapter):
+        """Only the URL span is protected; trailing plain '&' is escaped."""
+        result = adapter.format_message(
+            "https://example.com/page and AT&T"
+        )
+        assert "https://example.com/page" in result
+        assert "AT&amp;T" in result
+
     def test_escaping_is_idempotent(self, adapter):
         """Formatting already-formatted text produces the same result."""
         original = "AT&T < 5 > 3"

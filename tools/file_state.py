@@ -282,13 +282,16 @@ def _cap_dict(d: dict, limit: int) -> None:
     over = len(d) - limit
     if over <= 0:
         return
-    # dict preserves insertion order (PY>=3.7) — pop the oldest keys.
-    it = iter(d)
-    for _ in range(over):
-        try:
-            d.pop(next(it))
-        except (StopIteration, KeyError):
-            break
+    # dict preserves insertion order (PY>=3.7) — drop the oldest keys.
+    # Snapshot the keys first: mutating a dict (pop) while iterating it via
+    # iter(d) raises ``RuntimeError: dictionary changed size during iteration``
+    # on the *second* pop, so we cannot advance a live iterator across a
+    # mutation. Collecting the first ``over`` keys up front lets us pop safely
+    # for any ``over`` (including > 1, e.g. when the cap is lowered while the
+    # map is already populated).
+    keys_to_drop = list(d)[:over]
+    for key in keys_to_drop:
+        d.pop(key, None)
 
 
 # ── Convenience wrappers (short names used at call sites) ────────────

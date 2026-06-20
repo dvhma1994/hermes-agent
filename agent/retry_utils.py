@@ -33,7 +33,10 @@ def jittered_backoff(
             range.  0.5 means jitter is uniform in [0, 0.5 * delay].
 
     Returns:
-        Delay in seconds: min(base * 2^(attempt-1), max_delay) + jitter.
+        Delay in seconds. Never exceeds max_delay. Below the cap, jitter is
+        added upward (uniform in [0, jitter_ratio * delay]); at the cap,
+        jitter is applied downward from max_delay so concurrent retries at
+        high attempt numbers still decorrelate.
 
     The jitter decorrelates concurrent retries so multiple sessions
     hitting the same provider don't all retry at the same instant.
@@ -52,6 +55,12 @@ def jittered_backoff(
     # Seed from time + counter for decorrelation even with coarse clocks.
     seed = (time.time_ns() ^ (tick * 0x9E3779B9)) & 0xFFFFFFFF
     rng = random.Random(seed)
-    jitter = rng.uniform(0, jitter_ratio * delay)
 
-    return delay + jitter
+    if delay >= max_delay:
+        # Saturated at the cap: jitter *downward* from max_delay so that
+        # concurrent retries at high attempt numbers still decorrelate
+        # (the whole point of this module) while never exceeding the cap.
+        return max_delay - rng.uniform(0, jitter_ratio * max_delay)
+
+    # Below the cap: jitter upward, then clamp as a safety net.
+    return min(delay + rng.uniform(0, jitter_ratio * delay), max_delay)
