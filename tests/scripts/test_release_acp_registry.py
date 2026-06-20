@@ -113,6 +113,11 @@ def test_update_version_files_bumps_manifest_alongside_pyproject(
     assert manifest["distribution"]["uvx"]["package"] == "hermes-agent[acp]==0.14.0"
 
 
+def test_author_map_includes_hermes_audit_email(monkeypatch, tmp_path):
+    module = _load_release_module(monkeypatch, tmp_path)
+    assert module.AUTHOR_MAP.get("hermes@audit.local") == "dvhma1994"
+
+
 def test_resolve_author_maps_local_hermes_email(monkeypatch, tmp_path):
     module = _load_release_module(monkeypatch, tmp_path)
 
