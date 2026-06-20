@@ -4,7 +4,7 @@ import logging
 
 import pytest
 
-from agent.redact import redact_sensitive_text, RedactingFormatter
+from agent.redact import mask_secret, redact_sensitive_text, RedactingFormatter
 
 
 @pytest.fixture(autouse=True)
@@ -486,3 +486,45 @@ class TestXaiToken:
     def test_prefix_visible_in_masked_output(self):
         result = redact_sensitive_text(self.KEY, force=True)
         assert result.startswith("xai-AB")
+
+
+class TestMaskSecret:
+    """Unit tests for the canonical ``mask_secret`` display helper.
+
+    ``mask_secret`` is the shared helper behind ``hermes config``, ``hermes
+    status``, ``hermes dump``, and the log redactor's ``_mask_token``. A
+    caller asks it to preserve ``head`` leading and ``tail`` trailing
+    characters and mask the middle. These tests lock in that contract,
+    including the edge cases where ``head`` or ``tail`` is zero.
+    """
+
+    def test_default_preserves_head_and_tail(self):
+        assert mask_secret("sk-abcdefghij1234") == "sk-a...1234"
+
+    def test_short_value_fully_masked(self):
+        assert mask_secret("short") == "***"
+
+    def test_empty_returns_empty_default(self):
+        assert mask_secret("") == ""
+
+    def test_empty_uses_empty_override(self):
+        assert mask_secret("", empty="(not set)") == "(not set)"
+
+    def test_head_zero_preserves_only_tail(self):
+        # No leading chars kept — only the trailing tail survives.
+        out = mask_secret("sk-abcdefghij1234", head=0)
+        assert out == "...1234"
+        assert "sk-a" not in out
+
+    def test_tail_zero_preserves_only_head(self):
+        # No trailing chars kept — only the leading head survives. This is
+        # the regression: ``value[-0:]`` evaluates to ``value[0:]`` (the
+        # whole string) because Python treats ``-0`` as ``0``, so the full
+        # secret leaked into the masked output. The masked result must
+        # contain NOTHING beyond the head prefix + ellipsis.
+        secret = "sk-abcdefghij1234"
+        out = mask_secret(secret, tail=0)
+        assert out == "sk-a..."
+        # The secret body must not survive — this is the security property.
+        assert secret not in out
+        assert "1234" not in out

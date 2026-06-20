@@ -238,7 +238,14 @@ def mask_secret(
         return empty
     if len(value) < floor:
         return placeholder
-    return f"{value[:head]}...{value[-tail:]}"
+    # Guard against ``head``/``tail`` of 0 (or negative). ``value[-tail:]``
+    # when ``tail == 0`` evaluates to ``value[-0:]`` == ``value[0:]`` — i.e.
+    # the *entire* string — because Python treats ``-0`` as ``0``. For a
+    # masking helper that would silently leak the full secret, so build the
+    # prefix/suffix only when the count is positive.
+    prefix = value[:head] if head > 0 else ""
+    suffix = value[-tail:] if tail > 0 else ""
+    return f"{prefix}...{suffix}"
 
 
 def _mask_token(token: str) -> str:
