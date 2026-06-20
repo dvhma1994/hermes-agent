@@ -872,16 +872,19 @@ def has_known_pricing(
 
 
 def format_duration_compact(seconds: float) -> str:
-    if seconds < 60:
-        return f"{seconds:.0f}s"
-    minutes = seconds / 60
-    if minutes < 60:
-        return f"{minutes:.0f}m"
-    hours = minutes / 60
-    if hours < 24:
-        remaining_min = int(minutes % 60)
-        return f"{int(hours)}h {remaining_min}m" if remaining_min else f"{int(hours)}h"
-    days = hours / 24
+    s = int(round(seconds))
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        m = round(s / 60)  # round-to-nearest-minute (banker's, matching old :.0f)
+        if m >= 60:         # 59.5+ min rolls up to exactly 1h — never "60m"
+            return "1h"
+        return f"{m}m"
+    if s < 86400:
+        hours = s // 3600
+        remaining_min = (s % 3600) // 60
+        return f"{hours}h {remaining_min}m" if remaining_min else f"{hours}h"
+    days = s / 60 / 60 / 24  # same float path as original to avoid :.1f drift
     return f"{days:.1f}d"
 
 
