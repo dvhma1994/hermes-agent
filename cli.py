@@ -103,18 +103,9 @@ def estimate_usage_cost(*args, **kwargs):
 
 
 def format_duration_compact(*args, **kwargs):
-    seconds = float(args[0] if args else kwargs.get("seconds", 0.0))
-    if seconds < 60:
-        return f"{seconds:.0f}s"
-    minutes = seconds / 60
-    if minutes < 60:
-        return f"{minutes:.0f}m"
-    hours = minutes / 60
-    if hours < 24:
-        remaining_min = int(minutes % 60)
-        return f"{int(hours)}h {remaining_min}m" if remaining_min else f"{int(hours)}h"
-    days = hours / 24
-    return f"{days:.1f}d"
+    from agent.usage_pricing import format_duration_compact as _format_duration_compact
+
+    return _format_duration_compact(*args, **kwargs)
 
 
 def format_token_count_compact(*args, **kwargs):
