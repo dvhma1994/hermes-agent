@@ -30,7 +30,7 @@ import re
 import difflib
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, ClassVar
 from pathlib import Path
 from tools.binary_extensions import BINARY_EXTENSIONS
 
@@ -244,13 +244,56 @@ class SearchResult:
     limit_reason: Optional[str] = None
     error: Optional[str] = None
     
-    def to_dict(self) -> dict:
+    # Densify content-mode matches into a path-grouped text block above this
+    # many matches. Below it, the verbose array is already compact enough that
+    # the path-grouping header costs more than it saves.
+    _DENSIFY_MIN_MATCHES: ClassVar[int] = 5
+
+    def _densify_matches(self) -> Optional[str]:
+        """Render content-mode matches as a compact, path-grouped text block.
+
+        The verbose form repeats the ``{"path","line","content"}`` keys and the
+        full path string for every match. This groups consecutive matches by
+        path (path printed once, then ``  <line>: <content>`` rows), which is
+        lossless — every path, line number, and content byte is preserved — and
+        readable by the model without any decode step.
+
+        Returns ``None`` when densification is not worthwhile (too few matches),
+        so the caller falls back to the verbose array.
+        """
+        if len(self.matches) < self._DENSIFY_MIN_MATCHES:
+            return None
+        # ripgrep emits matches path-ordered (all hits in a file are
+        # consecutive), so grouping on path change collapses each file to a
+        # single header without reordering results.
+        lines: list[str] = []
+        current_path: Optional[str] = None
+        for m in self.matches:
+            if m.path != current_path:
+                lines.append(m.path)
+                current_path = m.path
+            # rstrip trailing whitespace only; leading indentation in code is
+            # meaningful and preserved verbatim after the "<line>: " prefix.
+            lines.append(f"  {m.line_number}: {m.content.rstrip()}")
+        return "\n".join(lines)
+
+    def to_dict(self, densify: bool = False) -> dict:
         result: dict[str, object] = {"total_count": self.total_count}
         if self.matches:
-            result["matches"] = [
-                {"path": m.path, "line": m.line_number, "content": m.content}
-                for m in self.matches
-            ]
+            dense = self._densify_matches() if densify else None
+            if dense is not None:
+                # Self-describing: the format key tells the model how to read
+                # the block so it never has to guess the shape.
+                result["matches_format"] = (
+                    "path-grouped: each file path on its own line, followed by "
+                    "indented '<line>: <content>' rows for matches in that file"
+                )
+                result["matches_text"] = dense
+            else:
+                result["matches"] = [
+                    {"path": m.path, "line": m.line_number, "content": m.content}
+                    for m in self.matches
+                ]
         if self.files:
             result["files"] = self.files
         if self.counts:
@@ -1030,12 +1073,28 @@ class ShellFileOperations(FileOperations):
         if offset == 1:
             read_output, _ = _strip_bom(read_output)
         
-        # Get total line count
-        wc_cmd = f"wc -l < {self._escape_shell_arg(path)}"
-        wc_result = self._exec(wc_cmd)
-        wc_output = _strip_terminal_fence_leaks(wc_result.stdout)
+        # Get total line count.
+        #
+        # ``wc -l`` counts *newlines*, not lines — a non-empty file whose
+        # last line has no trailing newline is undercounted by 1 (a 10-line
+        # file ending in "...line10" reports 9).  That undercount then makes
+        # the ``truncated`` check below wrong (``total_lines > end_line`` is
+        # false when it should be true), so the "use offset=..." continuation
+        # hint is never emitted and the model silently never sees the final
+        # ``awk 'END{print NR}'`` counts *records* (lines), which is
+        # newline-agnostic: a trailing-newline file reports the same value
+        # as ``wc -l``, a no-trailing-newline file reports one more, and an
+        # empty file reports 0 — exactly the semantics we need.
+        #
+        # The shell redirect (``< {path}``) is used rather than passing the
+        # path as an awk argument so a file literally named ``-`` is opened
+        # by the shell instead of being interpreted by awk as stdin —
+        # matching the original ``wc -l < {path}`` behaviour for every path.
+        count_cmd = f"awk 'END{{print NR}}' < {self._escape_shell_arg(path)}"
+        count_result = self._exec(count_cmd)
+        count_output = _strip_terminal_fence_leaks(count_result.stdout)
         try:
-            total_lines = int(wc_output.strip())
+            total_lines = int(count_output.strip())
         except ValueError:
             total_lines = 0
         

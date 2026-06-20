@@ -121,7 +121,13 @@ def render_account_usage_lines(snapshot: Optional[AccountUsageSnapshot], *, mark
 
 
 def _fmt_usd(d: float) -> str:
-    return f"${d:,.2f}"
+    # Render the minus sign BEFORE the currency symbol (financial convention:
+    # "-$5.00"), not after it ("$-5.00"). Debt balances (remaining < 0) reach
+    # this path — see build_nous_credits_snapshot's debt-clamp branch. Decide
+    # the sign from the *rounded* value so a sub-cent debt (e.g. -0.003) and
+    # signed zero (-0.0) don't render a spurious "-$0.00".
+    sign = "-" if round(d, 2) < 0 else ""
+    return f"{sign}${abs(d):,.2f}"
 
 
 def _is_finite_num(v: Any) -> TypeGuard[float]:
