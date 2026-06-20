@@ -401,7 +401,7 @@ class TestShellFileOpsHelpers:
                 return {"output": "print('ok')\n", "returncode": 0}
             if command.startswith("sed -n"):
                 return {"output": leaked, "returncode": 0}
-            if command.startswith("wc -l"):
+            if command.startswith("awk"):
                 return {"output": "1\n", "returncode": 0}
             return {"output": "", "returncode": 0}
 
